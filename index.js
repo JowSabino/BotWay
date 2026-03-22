@@ -1,461 +1,217 @@
-/**
- * BotWay - Microsoft Teams + YouTrack
- *
- * Requisitos:
- * - Node.js 18+
- * - npm install express helmet
- *
- * Variáveis de ambiente aceitas:
- * - PORT
- * - YOUTRACK_BASE_URL   (ou YOUTRACK_URL)
- * - YOUTRACK_TOKEN
- * - YOUTRACK_PROJECT_ID (ou YOUTRACK_PROJECT)
- * - YOUTRACK_FRENTE_NEGOCIO (opcional)
- */
-
 const express = require('express');
-const helmet = require('helmet');
-const path = require('path');
-
+const axios = require('axios');
+const crypto = require('crypto');
 const app = express();
-const PORT = process.env.PORT || 10000;
+app.use(express.json());
 
-/**
- * YouTrack
- * Aceita nomes antigos e novos para evitar quebrar sua configuração no Render.
- */
-const YOUTRACK_BASE_URL =
-  process.env.YOUTRACK_BASE_URL ||
-  process.env.YOUTRACK_URL ||
-  '';
+const ANTHROPIC_KEY    = process.env.ANTHROPIC_KEY;
+const YOUTRACK_TOKEN   = process.env.YOUTRACK_TOKEN;
+const YOUTRACK_URL     = process.env.YOUTRACK_URL || 'https://youtrack.cardway.net.br/youtrack';
+const YOUTRACK_PROJECT = process.env.YOUTRACK_PROJECT || '0-64';
+const TEAMS_SECRET     = process.env.TEAMS_SECRET || 'xu3/G2wa7an/0WUBkpcekqvAT6Tt0/0X9j7Peaf0Qe4=';
 
-const YOUTRACK_TOKEN =
-  process.env.YOUTRACK_TOKEN ||
-  '';
+const conversas = {};
+const TIPOS       = { '1': 'Demanda', '2': 'Ação', '3': 'Melhoria', '4': 'Oportunidade' };
+const RELEVANCIAS = { '1': 'Bloqueadora', '2': 'Crítica', '3': 'Alta', '4': 'Normal', '5': 'Baixa' };
+const PERGUNTAS = {
+  tipo:       '👋 Vamos criar um novo item no YouTrack!\n\nQual o **tipo**?\n`1` Demanda\n`2` Ação\n`3` Melhoria\n`4` Oportunidade',
+  descricao:  '📝 Descreva o que precisa ser registrado:',
+  fornecedor: '🏭 Qual o **fornecedor**? (ou `-` para pular)',
+  produto:    '📦 Qual o **produto**? (ou `-` para pular)',
+  relevancia: '⭐ Qual a **relevância**?\n`1` Bloqueadora\n`2` Crítica\n`3` Alta\n`4` Normal\n`5` Baixa'
+};
 
-const YOUTRACK_PROJECT_ID =
-  process.env.YOUTRACK_PROJECT_ID ||
-  process.env.YOUTRACK_PROJECT ||
-  '';
-
-/**
- * Campo obrigatório opcional no YouTrack.
- * Use o valor EXATO da opção cadastrada no campo "Frente de Negócio".
- */
-const YOUTRACK_FRENTE_NEGOCIO =
-  process.env.YOUTRACK_FRENTE_NEGOCIO ||
-  '';
-
-/**
- * Segurança compatível com Teams
- * Evita bloqueio em iframe/webview do Teams.
- */
-app.use(
-  helmet({
-    frameguard: false,
-    contentSecurityPolicy: {
-      useDefaults: true,
-      directives: {
-        'frame-ancestors': [
-          "'self'",
-          'https://teams.microsoft.com',
-          'https://*.teams.microsoft.com',
-          'https://*.skype.com',
-          'https://*.microsoft.com'
-        ]
-      }
-    }
-  })
-);
-
-/**
- * Parsers
- */
-app.use(express.json({ limit: '5mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-/**
- * Log global de requisições
- */
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
-  next();
-});
-
-/**
- * Arquivos estáticos opcionais
- */
-app.use(express.static(path.join(__dirname, 'public')));
-
-/* =========================================================
- * Helpers
- * =======================================================*/
-
-/**
- * Decodifica entidades HTML comuns.
- */
-function decodeHtmlEntities(text = '') {
-  return text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-}
-
-/**
- * Remove menções do Teams.
- */
-function removeTeamsMentions(text = '') {
-  return text
-    .replace(/<at>.*?<\/at>/gi, ' ')
-    .replace(
-      /<span[^>]*itemtype=["']http:\/\/schema\.skype\.com\/Mention["'][^>]*>.*?<\/span>/gi,
-      ' '
-    );
-}
-
-/**
- * Remove tags HTML.
- */
-function stripHtml(text = '') {
-  return text.replace(/<[^>]+>/g, ' ');
-}
-
-/**
- * Normaliza espaços.
- */
-function normalizeSpaces(text = '') {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Limpa o texto vindo do Teams.
- */
-function normalizeTeamsText(text = '') {
-  const decoded = decodeHtmlEntities(text);
-  const withoutMentions = removeTeamsMentions(decoded);
-  const noHtml = stripHtml(withoutMentions);
-  return normalizeSpaces(noHtml);
-}
-
-/**
- * Extrai o texto da mensagem recebida.
- */
-function extractIncomingText(body = {}) {
-  return (
-    body?.text ||
-    body?.attachments?.[0]?.content ||
-    body?.value?.text ||
-    ''
-  );
-}
-
-/**
- * Verifica se o YouTrack está configurado.
- */
-function isYouTrackConfigured() {
-  return Boolean(YOUTRACK_BASE_URL && YOUTRACK_TOKEN && YOUTRACK_PROJECT_ID);
-}
-
-/**
- * Monta URL da issue no YouTrack.
- */
-function buildYouTrackIssueUrl(idReadable) {
-  const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
-  return `${base}/issue/${idReadable}`;
-}
-
-/**
- * Resposta simples para o Teams.
- * O Teams entende bem esse formato.
- */
-function buildPlainMessage(text) {
-  return {
-    type: 'message',
-    text
-  };
-}
-
-/**
- * Cria issue no YouTrack.
- */
-async function createYouTrackIssue({ summary, description }) {
-  const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
-  const url = `${base}/api/issues?fields=id,idReadable,summary`;
-
-  const customFields = [];
-
-  /**
-   * Campo obrigatório opcional:
-   * Frente de Negócio
-   *
-   * Assume tipo enum simples.
-   */
-  if (YOUTRACK_FRENTE_NEGOCIO) {
-    customFields.push({
-      name: 'Frente de Negócio',
-      $type: 'SingleEnumIssueCustomField',
-      value: {
-        name: YOUTRACK_FRENTE_NEGOCIO
-      }
-    });
-  }
-
-  const payload = {
-    summary,
-    description,
-    project: {
-      id: YOUTRACK_PROJECT_ID
-    },
-    customFields
-  };
-
-  console.log('Payload YouTrack:', JSON.stringify(payload, null, 2));
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${YOUTRACK_TOKEN}`
-    },
-    body: JSON.stringify(payload)
+setInterval(() => {
+  const agora = Date.now();
+  Object.keys(conversas).forEach(k => {
+    if (agora - conversas[k].timestamp > 30 * 60 * 1000) delete conversas[k];
   });
+}, 5 * 60 * 1000);
 
-  const responseText = await response.text();
-  let data;
-
+function validarToken(req) {
   try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    data = { raw: responseText };
+    const auth = req.headers['authorization'] || '';
+    if (!auth.startsWith('HMAC ')) return false;
+    const hmacRecebido = auth.replace('HMAC ', '');
+    const body = JSON.stringify(req.body);
+    const key = Buffer.from(TEAMS_SECRET, 'base64');
+    const hmacCalculado = crypto.createHmac('sha256', key).update(body, 'utf8').digest('base64');
+    return hmacRecebido === hmacCalculado;
+  } catch (e) {
+    return false;
   }
-
-  if (!response.ok) {
-    throw new Error(
-      `YouTrack retornou ${response.status}: ${JSON.stringify(data)}`
-    );
-  }
-
-  return data;
 }
 
-/* =========================================================
- * Rotas básicas
- * =======================================================*/
+async function sugerirTitulo(dados) {
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `Crie um título claro e objetivo (máximo 80 caracteres) para um item do YouTrack:\nTipo: ${dados.tipo}\nDescrição: ${dados.descricao}\nFornecedor: ${dados.fornecedor || '-'}\nProduto: ${dados.produto || '-'}\nResponda APENAS com o título, sem aspas.`
+      }]
+    }, {
+      headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    });
+    return response.data.content[0].text.trim();
+  } catch (e) {
+    return dados.descricao.substring(0, 75).trim();
+  }
+}
 
-app.get('/', (req, res) => {
-  console.log('HOME / aberta');
-  res.status(200).send(`
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>BotWay</title>
-      </head>
-      <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h1>BotWay online</h1>
-        <p>Serviço rodando com sucesso.</p>
-        <p><a href="/health">/health</a></p>
-      </body>
-    </html>
-  `);
-});
+async function criarIssue(dados, titulo) {
+  const customFields = [
+    { name: 'Tipo PR', $type: 'SingleEnumIssueCustomField', value: { name: dados.tipo } },
+    { name: 'Relevância', $type: 'SingleEnumIssueCustomField', value: { name: dados.relevancia } }
+  ];
+  if (dados.fornecedor && dados.fornecedor !== '-') customFields.push({ name: 'Fornecedor', $type: 'SingleEnumIssueCustomField', value: { name: dados.fornecedor } });
+  if (dados.produto && dados.produto !== '-') customFields.push({ name: 'Produto', $type: 'SingleEnumIssueCustomField', value: { name: dados.produto } });
+  const response = await axios.post(
+    `${YOUTRACK_URL}/api/issues?fields=id,idReadable,summary`,
+    { summary: titulo, project: { id: YOUTRACK_PROJECT }, customFields },
+    { headers: { 'Authorization': `Bearer ${YOUTRACK_TOKEN}`, 'Content-Type': 'application/json' } }
+  );
+  return response.data;
+}
 
-app.get('/health', (req, res) => {
-  console.log('Health check recebido');
-  res.status(200).json({
-    ok: true,
-    service: 'BotWay',
-    time: new Date().toISOString()
-  });
-});
+async function processarMensagem(userId, texto) {
+  const msg = texto.replace(/<at>[^<]+<\/at>/gi, '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  console.log(`[${userId}] "${msg}"`);
 
-app.get('/webhook', (req, res) => {
-  console.log('GET /webhook recebido');
-  res.status(200).send('Webhook ativo');
-});
+  if (msg.toLowerCase() === '!cancelar' || msg.toLowerCase() === 'cancelar') {
+    if (conversas[userId]) { delete conversas[userId]; return '❌ Criação cancelada. Digite **!criar** para começar novamente.'; }
+    return null;
+  }
 
-/* =========================================================
- * Webhook principal do Teams
- * =======================================================*/
+  if (msg.toLowerCase().includes('!criar') || msg.toLowerCase() === '/novo') {
+    conversas[userId] = { etapa: 'tipo', dados: {}, timestamp: Date.now() };
+    return PERGUNTAS.tipo;
+  }
+
+  const conversa = conversas[userId];
+  if (!conversa) return null;
+  conversa.timestamp = Date.now();
+  const etapa = conversa.etapa;
+
+  if (etapa === 'tipo') {
+    const tipo = TIPOS[msg];
+    if (!tipo) return '⚠️ Opção inválida. Digite `1`, `2`, `3` ou `4`.';
+    conversa.dados.tipo = tipo;
+    conversa.etapa = 'descricao';
+    return `✅ **${tipo}** selecionada.\n\n` + PERGUNTAS.descricao;
+  }
+
+  if (etapa === 'descricao') {
+    if (msg.length < 5) return '⚠️ Descrição muito curta. Detalhe um pouco mais.';
+    conversa.dados.descricao = msg;
+    conversa.etapa = 'fornecedor';
+    return PERGUNTAS.fornecedor;
+  }
+
+  if (etapa === 'fornecedor') {
+    conversa.dados.fornecedor = msg === '-' ? '' : msg;
+    conversa.etapa = 'produto';
+    return PERGUNTAS.produto;
+  }
+
+  if (etapa === 'produto') {
+    conversa.dados.produto = msg === '-' ? '' : msg;
+    conversa.etapa = 'relevancia';
+    return PERGUNTAS.relevancia;
+  }
+
+  if (etapa === 'relevancia') {
+    const relevancia = RELEVANCIAS[msg];
+    if (!relevancia) return '⚠️ Opção inválida. Digite `1`, `2`, `3`, `4` ou `5`.';
+    conversa.dados.relevancia = relevancia;
+    conversa.etapa = 'confirmar';
+    const titulo = await sugerirTitulo(conversa.dados);
+    conversa.dados.titulo = titulo;
+    const d = conversa.dados;
+    return `📋 **Resumo do item:**\n\n• **Tipo:** ${d.tipo}\n• **Título:** ${d.titulo}\n• **Fornecedor:** ${d.fornecedor || '-'}\n• **Produto:** ${d.produto || '-'}\n• **Relevância:** ${d.relevancia}\n\nConfirma a criação? Digite **S** para criar ou **N** para cancelar.`;
+  }
+
+  if (etapa === 'confirmar') {
+    const r = msg.toLowerCase();
+    if (r === 'n' || r === 'não' || r === 'nao') { delete conversas[userId]; return '❌ Cancelado. Digite **!criar** para começar novamente.'; }
+    if (r !== 's' && r !== 'sim') return '⚠️ Digite **S** para confirmar ou **N** para cancelar.';
+    try {
+      const issue = await criarIssue(conversa.dados, conversa.dados.titulo);
+      const id = issue.idReadable;
+      delete conversas[userId];
+      return `✅ **Item criado com sucesso!**\n\n• **ID:** ${id}\n• **Tipo:** ${conversa.dados.tipo}\n• **Título:** ${issue.summary}\n\n🔗 Abrir: ${YOUTRACK_URL}/issue/${id}`;
+    } catch (e) {
+      console.error('Erro YouTrack:', e.response?.data || e.message);
+      return `❌ Erro ao criar no YouTrack: ${e.message}`;
+    }
+  }
+
+  return null;
+}
 
 app.post('/webhook', async (req, res) => {
+  if (!validarToken(req)) {
+    console.warn('Token inválido');
+    return res.status(401).json({ type: 'message', text: '⛔ Token inválido.' });
+  }
   try {
-    console.log('POST /webhook recebido');
-    console.log('Body:', JSON.stringify(req.body, null, 2));
-
-    const originalText = extractIncomingText(req.body);
-    const cleanedText = normalizeTeamsText(originalText);
-    const command = cleanedText.toLowerCase();
-
-    console.log('Texto original:', originalText);
-    console.log('Texto limpo:', cleanedText);
-    console.log('Comando normalizado:', command);
-
-    const requester = req.body?.from?.name || 'Usuário';
-    const teamId = req.body?.channelData?.team?.aadGroupId || '';
-    const channelId = req.body?.channelData?.channel?.id || '';
-    const messageId = req.body?.id || '';
-
-    /**
-     * Comando de ajuda
-     */
-    if (command === '!chat' || command.startsWith('!chat ')) {
-      return res.status(200).json(
-        buildPlainMessage(
-          [
-            'Olá! Eu sou o BotWay.',
-            '',
-            'Comandos disponíveis:',
-            '- !chat',
-            '- !criar Título do item',
-            '',
-            'Exemplo:',
-            '!criar Erro ao aprovar cartão no app'
-          ].join('\n')
-        )
-      );
-    }
-
-    /**
-     * Comando para criar issue
-     */
-    if (command === '!criar' || command.startsWith('!criar ')) {
-      const summary = cleanedText.replace(/^!criar\s*/i, '').trim();
-
-      if (!summary) {
-        return res.status(200).json(
-          buildPlainMessage('Envie o comando assim: !criar Título do item')
-        );
-      }
-
-      if (!isYouTrackConfigured()) {
-        return res.status(200).json(
-          buildPlainMessage(
-            [
-              'Recebi o comando, mas o YouTrack ainda não está configurado no servidor.',
-              'Defina as variáveis:',
-              '- YOUTRACK_BASE_URL',
-              '- YOUTRACK_TOKEN',
-              '- YOUTRACK_PROJECT_ID'
-            ].join('\n')
-          )
-        );
-      }
-
-      const descriptionLines = [
-        `Solicitante: ${requester}`,
-        'Origem: Microsoft Teams',
-        teamId ? `TeamId: ${teamId}` : '',
-        channelId ? `ChannelId: ${channelId}` : '',
-        messageId ? `MessageId: ${messageId}` : '',
-        '',
-        `Texto recebido: ${cleanedText}`
-      ].filter(Boolean);
-
-      const issue = await createYouTrackIssue({
-        summary,
-        description: descriptionLines.join('\n')
-      });
-
-      const idReadable = issue?.idReadable || issue?.id || 'sem-id';
-      const issueUrl = issue?.idReadable
-        ? buildYouTrackIssueUrl(issue.idReadable)
-        : YOUTRACK_BASE_URL;
-
-      return res.status(200).json(
-        buildPlainMessage(
-          `Item criado no YouTrack com sucesso: ${idReadable}\n${issueUrl}`
-        )
-      );
-    }
-
-    /**
-     * Fallback
-     */
-    return res.status(200).json(
-      buildPlainMessage(
-        'Comando não reconhecido. Use !chat ou !criar Título do item'
-      )
-    );
-  } catch (error) {
-    console.error('Erro no /webhook:', error);
-
-    return res.status(200).json(
-      buildPlainMessage(
-        `Recebi a solicitação, mas ocorreu um erro: ${error.message}`
-      )
-    );
+    const userId  = req.body.from?.id || 'unknown';
+    const texto   = req.body.text || '';
+    const resposta = await processarMensagem(userId, texto);
+    return res.json({ type: 'message', text: resposta || '' });
+  } catch (e) {
+    console.error('Erro:', e);
+    return res.status(500).json({ type: 'message', text: '❌ Erro interno. Tente novamente.' });
   }
 });
 
-/* =========================================================
- * Rotas auxiliares opcionais
- * =======================================================*/
+app.get('/', (req, res) => res.json({ status: 'BotWay online 🤖', versao: '1.1.0' }));
 
-app.post('/api/messages', (req, res) => {
-  console.log('POST /api/messages recebido');
-  console.log('Body:', JSON.stringify(req.body, null, 2));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`BotWay rodando na porta ${PORT}`));
 
-  return res.status(200).json({
-    ok: true,
-    message: 'Mensagem recebida com sucesso'
-  });
-});
+// ─── Rota /criar para o Copilot Studio ────────────────────────────────────────
+// Recebe campos simples e monta o body correto para o YouTrack
+app.post('/criar', async (req, res) => {
+  try {
+    const { tipo, titulo, relevancia, fornecedor, produto } = req.body;
 
-app.post('/validar', (req, res) => {
-  console.log('POST /validar recebido');
-  console.log('Body:', JSON.stringify(req.body, null, 2));
+    if (!tipo || !titulo || !relevancia) {
+      return res.status(400).json({ erro: 'Campos obrigatorios: tipo, titulo, relevancia' });
+    }
 
-  return res.status(200).json({
-    ok: true,
-    resultado: 'Validação recebida'
-  });
-});
+    // Mapear tipo com acento
+    const tipoMap = { 'Acao': 'Ação', 'Critica': 'Crítica' };
+    const tipoFinal = tipoMap[tipo] || tipo;
+    const relevanciaFinal = tipoMap[relevancia] || relevancia;
 
-/* =========================================================
- * 404
- * =======================================================*/
+    const customFields = [
+      { name: 'Tipo PR', $type: 'SingleEnumIssueCustomField', value: { name: tipoFinal } },
+      { name: 'Relevância', $type: 'SingleEnumIssueCustomField', value: { name: relevanciaFinal } }
+    ];
+    if (fornecedor && fornecedor !== '-') {
+      customFields.push({ name: 'Fornecedor', $type: 'SingleEnumIssueCustomField', value: { name: fornecedor } });
+    }
+    if (produto && produto !== '-') {
+      customFields.push({ name: 'Produto', $type: 'SingleEnumIssueCustomField', value: { name: produto } });
+    }
 
-app.use((req, res) => {
-  console.log(`Rota não encontrada: ${req.method} ${req.originalUrl}`);
-  res.status(404).json({
-    ok: false,
-    error: 'Rota não encontrada'
-  });
-});
+    const response = await axios.post(
+      `${YOUTRACK_URL}/api/issues?fields=id,idReadable,summary`,
+      { summary: titulo, project: { id: YOUTRACK_PROJECT }, customFields },
+      { headers: { 'Authorization': `Bearer ${YOUTRACK_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
 
-/* =========================================================
- * Tratamento de erro
- * =======================================================*/
+    const issue = response.data;
+    return res.json({
+      idReadable: issue.idReadable,
+      summary: issue.summary,
+      url: `${YOUTRACK_URL}/issue/${issue.idReadable}`
+    });
 
-app.use((err, req, res, next) => {
-  console.error('Erro interno:', err);
-  res.status(500).json({
-    ok: false,
-    error: 'Erro interno do servidor'
-  });
-});
-
-/* =========================================================
- * Falhas globais
- * =======================================================*/
-
-process.on('uncaughtException', (err) => {
-  console.error('uncaughtException:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('unhandledRejection:', reason);
-});
-
-/* =========================================================
- * Start
- * =======================================================*/
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`BotWay rodando na porta ${PORT}`);
-  console.log('Health disponível em /health');
+  } catch (e) {
+    console.error('Erro /criar:', e.response?.data || e.message);
+    return res.status(500).json({ erro: e.message });
+  }
 });
