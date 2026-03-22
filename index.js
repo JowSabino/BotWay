@@ -1,3 +1,4 @@
+// BotWay v1.1.0
 const express = require('express');
 const helmet = require('helmet');
 const path = require('path');
