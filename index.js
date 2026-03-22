@@ -1,4 +1,3 @@
-// BotWay v1.1.0
 const express = require('express');
 const helmet = require('helmet');
 const path = require('path');
@@ -6,10 +5,6 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-/**
- * Segurança compatível com abertura dentro do Teams
- * Evita bloquear a aplicação em iframe/webview do Teams.
- */
 app.use(
   helmet({
     frameguard: false,
@@ -28,21 +23,17 @@ app.use(
   })
 );
 
-// Parsing de JSON
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Log de todas as requisições
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   next();
 });
 
-// Se tiver front-end estático, deixe os arquivos em /public
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Health check para acordar/testar o Render
 app.get('/health', (req, res) => {
   console.log('Health check recebido');
   res.status(200).json({
@@ -52,8 +43,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Página inicial simples
 app.get('/', (req, res) => {
+  console.log('HOME / aberta');
   res.status(200).send(`
     <html>
       <head>
@@ -68,10 +59,6 @@ app.get('/', (req, res) => {
   `);
 });
 
-/**
- * Rota de teste para receber chamadas do Teams / Power Automate / card
- * Ajuste esta rota se seu app usa outro endpoint.
- */
 app.post('/api/messages', (req, res) => {
   console.log('POST /api/messages recebido');
   console.log('Body:', JSON.stringify(req.body, null, 2));
@@ -82,10 +69,6 @@ app.post('/api/messages', (req, res) => {
   });
 });
 
-/**
- * Rota opcional para o botão "Validar com assistente"
- * Use esta rota se seu card/app estiver chamando um endpoint web.
- */
 app.post('/validar', (req, res) => {
   console.log('POST /validar recebido');
   console.log('Body:', JSON.stringify(req.body, null, 2));
@@ -96,7 +79,24 @@ app.post('/validar', (req, res) => {
   });
 });
 
-// 404
+// NOVA ROTA: é essa que seu log mostrou que o Teams está chamando
+app.post('/webhook', (req, res) => {
+  console.log('POST /webhook recebido');
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+
+  return res.status(200).json({
+    ok: true,
+    message: 'Webhook recebido com sucesso'
+  });
+});
+
+// opcional: caso tentem abrir /webhook no navegador
+app.get('/webhook', (req, res) => {
+  console.log('GET /webhook recebido');
+
+  return res.status(200).send('Webhook ativo');
+});
+
 app.use((req, res) => {
   console.log(`Rota não encontrada: ${req.method} ${req.originalUrl}`);
   res.status(404).json({
@@ -105,7 +105,6 @@ app.use((req, res) => {
   });
 });
 
-// Tratamento de erro
 app.use((err, req, res, next) => {
   console.error('Erro interno:', err);
   res.status(500).json({
@@ -114,7 +113,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Logs de falhas globais
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', err);
 });
@@ -123,8 +121,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection:', reason);
 });
 
-// Start
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`BotWay rodando na porta ${PORT}`);
-  console.log(`Health disponível em /health`);
+  console.log('Health disponível em /health');
 });
