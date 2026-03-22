@@ -118,13 +118,61 @@ async function createYouTrackIssue({ summary, description }) {
   const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
   const url = `${base}/api/issues?fields=id,idReadable,summary`;
 
+const YOUTRACK_FRENTE_NEGOCIO = process.env.YOUTRACK_FRENTE_NEGOCIO || '';
+
+async function createYouTrackIssue({ summary, description }) {
+  const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
+  const url = `${base}/api/issues?fields=id,idReadable,summary`;
+
+  const customFields = [];
+
+  if (YOUTRACK_FRENTE_NEGOCIO) {
+    customFields.push({
+      name: 'Frente de Negócio',
+      $type: 'SingleEnumIssueCustomField',
+      value: {
+        name: YOUTRACK_FRENTE_NEGOCIO
+      }
+    });
+  }
+
   const payload = {
     summary,
     description,
     project: {
       id: YOUTRACK_PROJECT_ID
-    }
+    },
+    customFields
   };
+
+  console.log('Payload YouTrack:', JSON.stringify(payload, null, 2));
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${YOUTRACK_TOKEN}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const responseText = await response.text();
+  let data;
+
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    data = { raw: responseText };
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `YouTrack retornou ${response.status}: ${JSON.stringify(data)}`
+    );
+  }
+
+  return data;
+}
 
   const response = await fetch(url, {
     method: 'POST',
