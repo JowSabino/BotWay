@@ -1,7 +1,17 @@
-// BotWay - Teams + YouTrack
-// Requisitos:
-// - Node 18+
-// - npm install express helmet
+/**
+ * BotWay - Microsoft Teams + YouTrack
+ *
+ * Requisitos:
+ * - Node.js 18+
+ * - npm install express helmet
+ *
+ * Variáveis de ambiente aceitas:
+ * - PORT
+ * - YOUTRACK_BASE_URL   (ou YOUTRACK_URL)
+ * - YOUTRACK_TOKEN
+ * - YOUTRACK_PROJECT_ID (ou YOUTRACK_PROJECT)
+ * - YOUTRACK_FRENTE_NEGOCIO (opcional)
+ */
 
 const express = require('express');
 const helmet = require('helmet');
@@ -10,17 +20,36 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ===== CONFIGURAÇÕES =====
-// Defina estas variáveis no Render se quiser criar item no YouTrack:
-// YOUTRACK_BASE_URL=https://seu-dominio.youtrack.cloud
-// YOUTRACK_TOKEN=seu_token
-// YOUTRACK_PROJECT_ID=0-0   <-- ID interno do projeto no YouTrack
+/**
+ * YouTrack
+ * Aceita nomes antigos e novos para evitar quebrar sua configuração no Render.
+ */
+const YOUTRACK_BASE_URL =
+  process.env.YOUTRACK_BASE_URL ||
+  process.env.YOUTRACK_URL ||
+  '';
 
-const YOUTRACK_BASE_URL = process.env.YOUTRACK_BASE_URL || '';
-const YOUTRACK_TOKEN = process.env.YOUTRACK_TOKEN || '';
-const YOUTRACK_PROJECT_ID = process.env.YOUTRACK_PROJECT_ID || '';
+const YOUTRACK_TOKEN =
+  process.env.YOUTRACK_TOKEN ||
+  '';
 
-// ===== SEGURANÇA COMPATÍVEL COM TEAMS =====
+const YOUTRACK_PROJECT_ID =
+  process.env.YOUTRACK_PROJECT_ID ||
+  process.env.YOUTRACK_PROJECT ||
+  '';
+
+/**
+ * Campo obrigatório opcional no YouTrack.
+ * Use o valor EXATO da opção cadastrada no campo "Frente de Negócio".
+ */
+const YOUTRACK_FRENTE_NEGOCIO =
+  process.env.YOUTRACK_FRENTE_NEGOCIO ||
+  '';
+
+/**
+ * Segurança compatível com Teams
+ * Evita bloqueio em iframe/webview do Teams.
+ */
 app.use(
   helmet({
     frameguard: false,
@@ -39,21 +68,33 @@ app.use(
   })
 );
 
-// ===== PARSERS =====
+/**
+ * Parsers
+ */
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ===== LOG GLOBAL =====
+/**
+ * Log global de requisições
+ */
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   next();
 });
 
-// ===== ARQUIVOS ESTÁTICOS =====
+/**
+ * Arquivos estáticos opcionais
+ */
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ===== HELPERS =====
+/* =========================================================
+ * Helpers
+ * =======================================================*/
+
+/**
+ * Decodifica entidades HTML comuns.
+ */
 function decodeHtmlEntities(text = '') {
   return text
     .replace(/&nbsp;/gi, ' ')
@@ -64,10 +105,9 @@ function decodeHtmlEntities(text = '') {
     .replace(/&#39;/gi, "'");
 }
 
-function stripHtml(text = '') {
-  return text.replace(/<[^>]+>/g, ' ');
-}
-
+/**
+ * Remove menções do Teams.
+ */
 function removeTeamsMentions(text = '') {
   return text
     .replace(/<at>.*?<\/at>/gi, ' ')
@@ -77,10 +117,23 @@ function removeTeamsMentions(text = '') {
     );
 }
 
+/**
+ * Remove tags HTML.
+ */
+function stripHtml(text = '') {
+  return text.replace(/<[^>]+>/g, ' ');
+}
+
+/**
+ * Normaliza espaços.
+ */
 function normalizeSpaces(text = '') {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Limpa o texto vindo do Teams.
+ */
 function normalizeTeamsText(text = '') {
   const decoded = decodeHtmlEntities(text);
   const withoutMentions = removeTeamsMentions(decoded);
@@ -88,6 +141,9 @@ function normalizeTeamsText(text = '') {
   return normalizeSpaces(noHtml);
 }
 
+/**
+ * Extrai o texto da mensagem recebida.
+ */
 function extractIncomingText(body = {}) {
   return (
     body?.text ||
@@ -97,35 +153,47 @@ function extractIncomingText(body = {}) {
   );
 }
 
+/**
+ * Verifica se o YouTrack está configurado.
+ */
 function isYouTrackConfigured() {
   return Boolean(YOUTRACK_BASE_URL && YOUTRACK_TOKEN && YOUTRACK_PROJECT_ID);
 }
 
+/**
+ * Monta URL da issue no YouTrack.
+ */
 function buildYouTrackIssueUrl(idReadable) {
   const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
   return `${base}/issue/${idReadable}`;
 }
 
+/**
+ * Resposta simples para o Teams.
+ * O Teams entende bem esse formato.
+ */
 function buildPlainMessage(text) {
   return {
-    ok: true,
     type: 'message',
     text
   };
 }
 
-async function createYouTrackIssue({ summary, description }) {
-  const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
-  const url = `${base}/api/issues?fields=id,idReadable,summary`;
-
-const YOUTRACK_FRENTE_NEGOCIO = process.env.YOUTRACK_FRENTE_NEGOCIO || '';
-
+/**
+ * Cria issue no YouTrack.
+ */
 async function createYouTrackIssue({ summary, description }) {
   const base = YOUTRACK_BASE_URL.replace(/\/+$/, '');
   const url = `${base}/api/issues?fields=id,idReadable,summary`;
 
   const customFields = [];
 
+  /**
+   * Campo obrigatório opcional:
+   * Frente de Negócio
+   *
+   * Assume tipo enum simples.
+   */
   if (YOUTRACK_FRENTE_NEGOCIO) {
     customFields.push({
       name: 'Frente de Negócio',
@@ -174,34 +242,10 @@ async function createYouTrackIssue({ summary, description }) {
   return data;
 }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${YOUTRACK_TOKEN}`
-    },
-    body: JSON.stringify(payload)
-  });
+/* =========================================================
+ * Rotas básicas
+ * =======================================================*/
 
-  const responseText = await response.text();
-  let data;
-
-  try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    data = { raw: responseText };
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `YouTrack retornou ${response.status}: ${JSON.stringify(data)}`
-    );
-  }
-
-  return data;
-}
-
-// ===== ROTAS BÁSICAS =====
 app.get('/', (req, res) => {
   console.log('HOME / aberta');
   res.status(200).send(`
@@ -233,7 +277,10 @@ app.get('/webhook', (req, res) => {
   res.status(200).send('Webhook ativo');
 });
 
-// ===== WEBHOOK DO TEAMS =====
+/* =========================================================
+ * Webhook principal do Teams
+ * =======================================================*/
+
 app.post('/webhook', async (req, res) => {
   try {
     console.log('POST /webhook recebido');
@@ -247,13 +294,14 @@ app.post('/webhook', async (req, res) => {
     console.log('Texto limpo:', cleanedText);
     console.log('Comando normalizado:', command);
 
-    // Ação vinda de card/bot, se existir
-    const actionValue = req.body?.value?.acao || req.body?.action || null;
-    if (actionValue) {
-      console.log('Ação recebida:', actionValue);
-    }
+    const requester = req.body?.from?.name || 'Usuário';
+    const teamId = req.body?.channelData?.team?.aadGroupId || '';
+    const channelId = req.body?.channelData?.channel?.id || '';
+    const messageId = req.body?.id || '';
 
-    // ===== COMANDO !chat =====
+    /**
+     * Comando de ajuda
+     */
     if (command === '!chat' || command.startsWith('!chat ')) {
       return res.status(200).json(
         buildPlainMessage(
@@ -271,15 +319,15 @@ app.post('/webhook', async (req, res) => {
       );
     }
 
-    // ===== COMANDO !criar =====
+    /**
+     * Comando para criar issue
+     */
     if (command === '!criar' || command.startsWith('!criar ')) {
       const summary = cleanedText.replace(/^!criar\s*/i, '').trim();
 
       if (!summary) {
         return res.status(200).json(
-          buildPlainMessage(
-            'Envie o comando assim: !criar Título do item'
-          )
+          buildPlainMessage('Envie o comando assim: !criar Título do item')
         );
       }
 
@@ -297,14 +345,9 @@ app.post('/webhook', async (req, res) => {
         );
       }
 
-      const requester = req.body?.from?.name || 'Usuário';
-      const teamId = req.body?.channelData?.team?.aadGroupId || '';
-      const channelId = req.body?.channelData?.channel?.id || '';
-      const messageId = req.body?.id || '';
-
       const descriptionLines = [
         `Solicitante: ${requester}`,
-        `Origem: Microsoft Teams`,
+        'Origem: Microsoft Teams',
         teamId ? `TeamId: ${teamId}` : '',
         channelId ? `ChannelId: ${channelId}` : '',
         messageId ? `MessageId: ${messageId}` : '',
@@ -318,7 +361,9 @@ app.post('/webhook', async (req, res) => {
       });
 
       const idReadable = issue?.idReadable || issue?.id || 'sem-id';
-      const issueUrl = issue?.idReadable ? buildYouTrackIssueUrl(issue.idReadable) : YOUTRACK_BASE_URL;
+      const issueUrl = issue?.idReadable
+        ? buildYouTrackIssueUrl(issue.idReadable)
+        : YOUTRACK_BASE_URL;
 
       return res.status(200).json(
         buildPlainMessage(
@@ -327,14 +372,9 @@ app.post('/webhook', async (req, res) => {
       );
     }
 
-    // ===== AÇÕES VINDAS DE CARD =====
-    if (actionValue === 'validar') {
-      return res.status(200).json(
-        buildPlainMessage('Validação recebida com sucesso.')
-      );
-    }
-
-    // ===== FALLBACK =====
+    /**
+     * Fallback
+     */
     return res.status(200).json(
       buildPlainMessage(
         'Comando não reconhecido. Use !chat ou !criar Título do item'
@@ -351,7 +391,10 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ===== ROTAS AUXILIARES OPCIONAIS =====
+/* =========================================================
+ * Rotas auxiliares opcionais
+ * =======================================================*/
+
 app.post('/api/messages', (req, res) => {
   console.log('POST /api/messages recebido');
   console.log('Body:', JSON.stringify(req.body, null, 2));
@@ -372,7 +415,10 @@ app.post('/validar', (req, res) => {
   });
 });
 
-// ===== 404 =====
+/* =========================================================
+ * 404
+ * =======================================================*/
+
 app.use((req, res) => {
   console.log(`Rota não encontrada: ${req.method} ${req.originalUrl}`);
   res.status(404).json({
@@ -381,7 +427,10 @@ app.use((req, res) => {
   });
 });
 
-// ===== ERRO INTERNO =====
+/* =========================================================
+ * Tratamento de erro
+ * =======================================================*/
+
 app.use((err, req, res, next) => {
   console.error('Erro interno:', err);
   res.status(500).json({
@@ -390,7 +439,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ===== FALHAS GLOBAIS =====
+/* =========================================================
+ * Falhas globais
+ * =======================================================*/
+
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', err);
 });
@@ -399,7 +451,10 @@ process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection:', reason);
 });
 
-// ===== START =====
+/* =========================================================
+ * Start
+ * =======================================================*/
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`BotWay rodando na porta ${PORT}`);
   console.log('Health disponível em /health');
